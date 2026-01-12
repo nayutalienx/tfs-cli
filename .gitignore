@@ -1,0 +1,25 @@
+# Go build/test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Binaries
+/tfs
+
+# Go workspace files
+/go.work
+/go.work.sum
+
+# Local caches
+/.cache/
+/.gocache/
+
+# IDE/editor
+.idea/
+.vscode/
+
+tfs
