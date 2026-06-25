@@ -396,6 +396,8 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	sets := stringSliceFlag{}
 	fs.Var(&sets, "set", "Field=Value (repeatable)")
 	comment := fs.String("add-comment", "", "Add comment to System.History")
+	parent := fs.Int("parent", 0, "Parent work item ID (reparent)")
+	parentRel := fs.String("parent-rel", "System.LinkTypes.Hierarchy-Reverse", "Parent relation type")
 	yes := fs.Bool("yes", false, "Confirm bulk updates (>5 fields)")
 	idArg, rest := splitPositional(args, updateValueFlags())
 	if err := fs.Parse(rest); err != nil {
@@ -410,8 +412,8 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 		output.WriteError(stderr, errs.New("invalid_args", "work item id must be a number", nil), flags.json)
 		return 1
 	}
-	if len(sets.values) == 0 && *comment == "" {
-		output.WriteError(stderr, errs.New("invalid_args", "at least one --set or --add-comment is required", nil), flags.json)
+	if len(sets.values) == 0 && *comment == "" && *parent == 0 {
+		output.WriteError(stderr, errs.New("invalid_args", "at least one --set, --add-comment, or --parent is required", nil), flags.json)
 		return 1
 	}
 	if len(sets.values) > 5 && !*yes {
@@ -428,16 +430,25 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	patch, err := buildPatch(sets.values, *comment)
-	if err != nil {
-		output.WriteError(stderr, err, ctx.jsonMode)
-		return 1
-	}
 	client, err := api.NewClient(ctx.baseURL, ctx.project, ctx.pat, ctx.insecure, ctx.verbose, stderr)
 	if err != nil {
 		output.WriteError(stderr, err, ctx.jsonMode)
 		return 1
 	}
+
+	patch, err := buildPatch(sets.values, *comment)
+	if err != nil {
+		output.WriteError(stderr, err, ctx.jsonMode)
+		return 1
+	}
+
+	parentPatch, err := buildParentPatch(context.Background(), client, id, *parent, *parentRel)
+	if err != nil {
+		output.WriteError(stderr, err, ctx.jsonMode)
+		return 1
+	}
+	patch = append(patch, parentPatch...)
+
 	wi, err := client.UpdateWorkItem(context.Background(), id, patch)
 	if err != nil {
 		output.WriteError(stderr, err, ctx.jsonMode)
@@ -1175,6 +1186,61 @@ func buildCreatePatch(ctx context.Context, client *api.Client, title string, ass
 	return patch, nil
 }
 
+func buildParentPatch(ctx context.Context, client *api.Client, itemID int, parentID int, parentRel string) ([]map[string]interface{}, error) {
+	if parentID == 0 {
+		return nil, nil
+	}
+	if parentRel == "" {
+		parentRel = "System.LinkTypes.Hierarchy-Reverse"
+	}
+
+	wi, err := client.GetWorkItem(ctx, itemID, nil, "relations")
+	if err != nil {
+		return nil, err
+	}
+
+	patch := []map[string]interface{}{}
+	existingParentIndices := []int{}
+	existingParentID := 0
+	for i, raw := range wi.Relations {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		rel, _ := m["rel"].(string)
+		if rel == parentRel {
+			existingParentIndices = append(existingParentIndices, i)
+			url, _ := m["url"].(string)
+			if existingParentID == 0 {
+				existingParentID = idFromURL(url)
+			}
+		}
+	}
+
+	if existingParentID == parentID && len(existingParentIndices) == 1 {
+		return nil, nil
+	}
+
+	for i := len(existingParentIndices) - 1; i >= 0; i-- {
+		idx := existingParentIndices[i]
+		patch = append(patch, map[string]interface{}{
+			"op":    "remove",
+			"path":  fmt.Sprintf("/relations/%d", idx),
+		})
+	}
+
+	patch = append(patch, map[string]interface{}{
+		"op":   "add",
+		"path": "/relations/-",
+		"value": map[string]interface{}{
+			"rel": parentRel,
+			"url": client.WorkItemURL(parentID),
+		},
+	})
+
+	return patch, nil
+}
+
 func parseAssignment(input string) (string, string, error) {
 	parts := strings.SplitN(input, "=", 2)
 	if len(parts) != 2 {
@@ -1589,6 +1655,8 @@ func updateValueFlags() map[string]bool {
 	flags := wiqlValueFlags()
 	flags["set"] = true
 	flags["add-comment"] = true
+	flags["parent"] = true
+	flags["parent-rel"] = true
 	flags["yes"] = false
 	return flags
 }
@@ -1620,7 +1688,7 @@ func printUsage(w io.Writer) {
 		"Usage:",
 		"  tfs wiql \"<WIQL>\" [--project P] [--top N] [--json]              Run a WIQL query and list matching items.",
 		"  tfs view <id> [--fields f1,f2,...] [--expand relations|all|none] [--json]  Show a work item by ID.",
-		"  tfs update <id> --set \"Field=Value\" ... [--add-comment \"text\"] [--json] [--yes]  Update fields/comments.",
+		"  tfs update <id> --set \"Field=Value\" ... [--add-comment \"text\"] [--parent <id>] [--parent-rel <rel>] [--json] [--yes]  Update fields/comments/parent.",
 		"  tfs create --type \"<WorkItemType>\" --title \"<Title>\" [--set \"Field=Value\"...] [--assigned-to \"Owner\"] [--parent <id>] [--json]  Create a work item.",
 		"  tfs delete <id> --yes [--destroy] [--json]                         Delete a work item; --destroy attempts permanent removal.",
 		"  tfs pr create --repository \"<Repo>\" --source \"<Branch>\" --target \"<Branch>\" --title \"<Title>\" [--description \"<Text>\"] [--draft] [--work-item <ID> ...] [--auto-complete] [--json]  Create a pull request.",
