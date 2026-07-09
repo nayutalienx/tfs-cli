@@ -111,6 +111,42 @@
 `--work-item` опционален и repeatable: передавайте его, если нужно привязать задачи к PR через Related Work Items.
 `--auto-complete` тоже опционален и по умолчанию выключен: указывайте его только если пользователь явно попросил автомерж PR после прохождения политик.
 
+## Посмотреть pull request
+Можно передать полный URL или просто ID с `--repository`:
+
+```powershell
+.\tfs-cli.exe pr show "https://tfs.example.com/DefaultCollection/Project/_git/repo-name/pullrequest/12345"
+```
+
+```powershell
+.\tfs-cli.exe pr show 12345 --repository "repo-name"
+```
+
+Команда выводит: имя репозитория, ветки (source -> target), заголовок PR, описание, список привязанных work items (с типом/статусом/заголовком) и комментарии (threads). Используйте `--json=false` для текстового вывода.
+
+Для показа git-диффов изменённых файлов добавьте `--git-diff`:
+
+```powershell
+.\tfs-cli.exe pr show 12345 --repository "repo-name" --git-diff --json=false
+```
+
+Дифф вычисляется локально: CLI получает список изменённых файлов через iteration changes API, загружает содержимое каждой версии и строит unified diff.
+
+## Оставить комментарий в pull request
+Можно передать полный URL или просто ID с `--repository`:
+
+```powershell
+.\tfs-cli.exe pr comment "https://tfs.example.com/DefaultCollection/Project/_git/repo-name/pullrequest/12345" `
+  --content "Комментарий ревью" --json=false
+```
+
+Способы передачи текста:
+- `--content "текст"` — inline
+- `--content -` — читать из stdin
+- `--content-file <путь>` — читать из файла
+
+Опциональный `--status` задаёт статус треда (active, byDesign, resolved, closed, wontFix, unknown; по умолчанию: active).
+
 ## Посмотреть подробности и дочерние элементы
 ```powershell
 .\tfs-cli.exe show <ID>

@@ -9,6 +9,8 @@ CLI for working with TFS/Azure DevOps Server work items (create, update, delete,
 - Show details and child items.
 - List work item types and resolve your identity.
 - Create Git pull requests in TFS/Azure DevOps Server.
+- Show Git pull request details by URL or ID (repo, branches, work items, comments).
+- Post comment threads on pull requests (inline, stdin, or file input).
 - JSON output by default, with optional text tables.
 
 ## Requirements
@@ -91,6 +93,8 @@ Run `./tfs --help` for the full command list. Main commands:
 - `my` - list your assigned items
 - `show` - show details plus child items
 - `pr create` - create a Git pull request
+- `pr show` - show pull request details (repo, branches, title, work items, comments)
+- `pr comment` - post a comment thread on a pull request
 - `types` - list work item types
 - `whoami` - show the resolved identity from the PAT
 - `config` - view/set stored config
@@ -157,6 +161,41 @@ Create a pull request:
 ```
 
 If you pass `--work-item`, the CLI links those work items to the PR. `--auto-complete` is optional and disabled by default.
+
+Show a pull request by URL:
+
+```bash
+./tfs pr show "https://dev.azure.com/your-org/YourProject/_git/your-repo/pullrequest/42"
+```
+
+Show a pull request by ID with explicit repository:
+
+```bash
+./tfs pr show 42 --repository "your-repo"
+```
+
+The `pr show` command prints the repository name, source and target branches, PR title, description, linked work items (with type/state/title), and comment threads. Use `--json=false` for human-readable text output. `--max-threads N` limits the number of comment threads shown. Add `--git-diff` to fetch and display unified diffs of changed files in the pull request.
+
+Post a comment on a pull request:
+
+```bash
+./tfs pr comment "https://dev.azure.com/your-org/YourProject/_git/your-repo/pullrequest/42" \
+  --content "Looks good — approved" --json=false
+```
+
+Post a long comment from a file:
+
+```bash
+./tfs pr comment 42 --repository "your-repo" --content-file review-report.md
+```
+
+Post a comment from stdin:
+
+```bash
+echo "Please fix the null check in service.java" | ./tfs pr comment 42 --repository "your-repo" --content -
+```
+
+The `pr comment` command creates a new comment thread on the pull request. Content can be provided via `--content "text"`, `--content -` (stdin), or `--content-file <path>`. Optional `--status` sets the thread status (active, byDesign, resolved, closed, wontFix, unknown; default: active).
 
 Show details and children:
 

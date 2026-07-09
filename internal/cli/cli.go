@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 
 	"tfs-cli/internal/api"
 	"tfs-cli/internal/config"
+	"tfs-cli/internal/diff"
 	"tfs-cli/internal/errs"
 	"tfs-cli/internal/output"
 )
@@ -559,6 +561,10 @@ func runPR(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "create":
 		return runPRCreate(args[1:], stdout, stderr)
+	case "show":
+		return runPRShow(args[1:], stdout, stderr)
+	case "comment":
+		return runPRComment(args[1:], stdout, stderr)
 	default:
 		output.WriteError(stderr, errs.New("unknown_command", "unknown pr subcommand", args[0]), true)
 		return 1
@@ -645,6 +651,292 @@ func runPRCreate(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return renderPullRequest(ctx, pr)
+}
+
+func runPRShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("pr show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	flags := globalFlags{}
+	addGlobalFlags(fs, &flags)
+	repository := fs.String("repository", "", "Repository name or ID (required when <id> is not a URL)")
+	maxThreads := fs.Int("max-threads", 0, "Maximum number of comment threads to show (0 = all)")
+	gitDiff := fs.Bool("git-diff", false, "Show git diff of pull request changes")
+	arg, rest := splitPositional(args, prShowValueFlags())
+	if err := fs.Parse(rest); err != nil {
+		return 1
+	}
+	if arg == "" {
+		output.WriteError(stderr, errs.New("invalid_args", "pull request URL or ID is required", nil), flags.json)
+		return 1
+	}
+
+	ctx, err := buildContext(flags, stdout, stderr)
+	if err != nil {
+		output.WriteError(stderr, err, flags.json)
+		return 1
+	}
+
+	var repositoryName string
+	var prID int
+	var baseURL string
+	var project string
+
+	if isURL(arg) {
+		locator, err := parsePullRequestURL(arg)
+		if err != nil {
+			output.WriteError(stderr, err, flags.json)
+			return 1
+		}
+		baseURL = locator.BaseURL
+		project = locator.Project
+		repositoryName = locator.Repository
+		prID = locator.PullRequestID
+	} else {
+		id, err := strconv.Atoi(arg)
+		if err != nil || id <= 0 {
+			output.WriteError(stderr, errs.New("invalid_args", "pull request id must be a positive number or a URL", arg), flags.json)
+			return 1
+		}
+		prID = id
+		repositoryName = strings.TrimSpace(*repository)
+		baseURL = ctx.baseURL
+		project = ctx.project
+	}
+
+	if repositoryName == "" {
+		output.WriteError(stderr, errs.New("invalid_args", "repository is required (use --repository or a full URL)", nil), flags.json)
+		return 1
+	}
+	if project == "" {
+		output.WriteError(stderr, errs.New("config_missing", "project is required", nil), flags.json)
+		return 1
+	}
+
+	client, err := api.NewClient(baseURL, project, ctx.pat, ctx.insecure, ctx.verbose, stderr)
+	if err != nil {
+		output.WriteError(stderr, err, ctx.jsonMode)
+		return 1
+	}
+
+	pr, err := client.GetPullRequest(context.Background(), repositoryName, prID)
+	if err != nil {
+		output.WriteError(stderr, err, ctx.jsonMode)
+		return 1
+	}
+
+	threads, threadErr := client.GetPullRequestThreads(context.Background(), repositoryName, prID)
+	if threadErr != nil {
+		if ctx.verbose {
+			fmt.Fprintf(stderr, "warning: could not fetch threads: %v\n", threadErr)
+		}
+		threads = nil
+	}
+	if *maxThreads > 0 && len(threads) > *maxThreads {
+		threads = threads[:*maxThreads]
+	}
+
+	workItemRefs := pr.WorkItemRefs
+	if len(workItemRefs) == 0 {
+		wiRefs, wiErr := client.GetPullRequestWorkItems(context.Background(), repositoryName, prID)
+		if wiErr != nil {
+			if ctx.verbose {
+				fmt.Fprintf(stderr, "warning: could not fetch work items: %v\n", wiErr)
+			}
+		} else {
+			workItemRefs = wiRefs
+		}
+	}
+
+	workItemIDs := make([]int, 0, len(workItemRefs))
+	for _, ref := range workItemRefs {
+		if id, err := strconv.Atoi(ref.ID); err == nil && id > 0 {
+			workItemIDs = append(workItemIDs, id)
+		}
+	}
+	workItems, err := fetchWorkItems(context.Background(), client, workItemIDs)
+	if err != nil {
+		if ctx.verbose {
+			fmt.Fprintf(stderr, "warning: could not fetch work item details: %v\n", err)
+		}
+		workItems = nil
+	}
+
+	var fileDiffs []FileDiff
+	if *gitDiff {
+		fileDiffs, err = fetchPullRequestDiffs(context.Background(), client, repositoryName, pr, ctx.verbose, stderr)
+		if err != nil && ctx.verbose {
+			fmt.Fprintf(stderr, "warning: could not fetch git diff: %v\n", err)
+		}
+	}
+
+	return renderPullRequestDetails(ctx, pr, workItems, threads, fileDiffs, *gitDiff)
+}
+
+func runPRComment(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("pr comment", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	flags := globalFlags{}
+	addGlobalFlags(fs, &flags)
+	repository := fs.String("repository", "", "Repository name or ID (required when <id> is not a URL)")
+	content := fs.String("content", "", "Comment content (use '-' for stdin)")
+	contentFile := fs.String("content-file", "", "Read comment content from file")
+	status := fs.String("status", "active", "Thread status: active, byDesign, resolved, closed, wontFix, unknown")
+	arg, rest := splitPositional(args, prCommentValueFlags())
+	if err := fs.Parse(rest); err != nil {
+		return 1
+	}
+	if arg == "" {
+		output.WriteError(stderr, errs.New("invalid_args", "pull request URL or ID is required", nil), flags.json)
+		return 1
+	}
+
+	ctx, err := buildContext(flags, stdout, stderr)
+	if err != nil {
+		output.WriteError(stderr, err, flags.json)
+		return 1
+	}
+
+	var repositoryName string
+	var prID int
+	var baseURL string
+	var project string
+
+	if isURL(arg) {
+		locator, err := parsePullRequestURL(arg)
+		if err != nil {
+			output.WriteError(stderr, err, flags.json)
+			return 1
+		}
+		baseURL = locator.BaseURL
+		project = locator.Project
+		repositoryName = locator.Repository
+		prID = locator.PullRequestID
+	} else {
+		id, err := strconv.Atoi(arg)
+		if err != nil || id <= 0 {
+			output.WriteError(stderr, errs.New("invalid_args", "pull request id must be a positive number or a URL", arg), flags.json)
+			return 1
+		}
+		prID = id
+		repositoryName = strings.TrimSpace(*repository)
+		baseURL = ctx.baseURL
+		project = ctx.project
+	}
+
+	if repositoryName == "" {
+		output.WriteError(stderr, errs.New("invalid_args", "repository is required (use --repository or a full URL)", nil), flags.json)
+		return 1
+	}
+	if project == "" {
+		output.WriteError(stderr, errs.New("config_missing", "project is required", nil), flags.json)
+		return 1
+	}
+
+	var commentText string
+	if *contentFile != "" {
+		data, err := os.ReadFile(*contentFile)
+		if err != nil {
+			output.WriteError(stderr, errs.New("read_error", "could not read content file", err.Error()), flags.json)
+			return 1
+		}
+		commentText = string(data)
+	} else if *content == "-" {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			output.WriteError(stderr, errs.New("read_error", "could not read stdin", err.Error()), flags.json)
+			return 1
+		}
+		commentText = string(data)
+	} else if *content != "" {
+		commentText = *content
+	} else {
+		output.WriteError(stderr, errs.New("invalid_args", "comment content is required (use --content, --content -, or --content-file)", nil), flags.json)
+		return 1
+	}
+
+	commentText = strings.TrimSpace(commentText)
+	if commentText == "" {
+		output.WriteError(stderr, errs.New("invalid_args", "comment content is empty", nil), flags.json)
+		return 1
+	}
+
+	statusCode, err := mapThreadStatus(*status)
+	if err != nil {
+		output.WriteError(stderr, err, flags.json)
+		return 1
+	}
+
+	client, err := api.NewClient(baseURL, project, ctx.pat, ctx.insecure, ctx.verbose, stderr)
+	if err != nil {
+		output.WriteError(stderr, err, ctx.jsonMode)
+		return 1
+	}
+
+	thread, err := client.CreatePullRequestThread(context.Background(), repositoryName, prID, api.CreatePullRequestThreadRequest{
+		Comments: []api.CreatePullRequestComment{
+			{
+				Content:     commentText,
+				CommentType: 1,
+			},
+		},
+		Status: statusCode,
+	})
+	if err != nil {
+		output.WriteError(stderr, err, ctx.jsonMode)
+		return 1
+	}
+
+	return renderPullRequestComment(ctx, thread)
+}
+
+func renderPullRequestComment(ctx commandContext, thread api.GitPullRequestThread) int {
+	if ctx.jsonMode {
+		if err := output.PrintJSON(ctx.stdout, thread); err != nil {
+			output.WriteError(ctx.stderr, err, ctx.jsonMode)
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(ctx.stdout, "ThreadID: %d\n", thread.ID)
+	if thread.Status != "" {
+		fmt.Fprintf(ctx.stdout, "Status: %s\n", thread.Status)
+	}
+	for _, comment := range thread.Comments {
+		if comment.IsDeleted {
+			continue
+		}
+		author := identityDisplayName(comment.Author)
+		date := comment.PublishedDate
+		if date == "" {
+			date = comment.LastUpdatedDate
+		}
+		prefix := author
+		if date != "" {
+			prefix = fmt.Sprintf("%s (%s)", author, date)
+		}
+		fmt.Fprintf(ctx.stdout, "Comment: %s\n", prefix)
+		fmt.Fprintln(ctx.stdout, comment.Content)
+	}
+	return 0
+}
+
+func mapThreadStatus(value string) (int, error) {
+	switch strings.ToLower(value) {
+	case "active", "":
+		return 1, nil
+	case "bydesign":
+		return 2, nil
+	case "resolved":
+		return 3, nil
+	case "closed":
+		return 4, nil
+	case "wontfix":
+		return 5, nil
+	case "unknown":
+		return 6, nil
+	default:
+		return 0, errs.New("invalid_args", "status must be one of: active, byDesign, resolved, closed, wontFix, unknown", value)
+	}
 }
 
 func runConfig(args []string, stdout, stderr io.Writer) int {
@@ -1005,6 +1297,379 @@ func renderPullRequest(ctx commandContext, pr api.GitPullRequest) int {
 	}
 	fmt.Fprintf(ctx.stdout, "URL: %s\n", pullRequestURL(pr))
 	return 0
+}
+
+func renderPullRequestDetails(ctx commandContext, pr api.GitPullRequest, workItems []output.WorkItem, threads []api.GitPullRequestThread, fileDiffs []FileDiff, showDiff bool) int {
+	if ctx.jsonMode {
+		payload := map[string]interface{}{
+			"pullRequestId":   pr.PullRequestID,
+			"status":          pr.Status,
+			"title":           pr.Title,
+			"description":     pr.Description,
+			"repository":      pr.Repository.Name,
+			"sourceRefName":   pr.SourceRefName,
+			"targetRefName":   pr.TargetRefName,
+			"isDraft":         pr.IsDraft,
+			"creationDate":    pr.CreationDate,
+			"createdBy":       identityDisplayName(pr.CreatedBy),
+			"hasAutoComplete": pr.AutoCompleteSetBy != nil && pr.AutoCompleteSetBy.ID != "",
+			"workItemIds":     resourceRefIDs(pr.WorkItemRefs),
+			"workItems":       workItems,
+			"threads":         threads,
+			"url":             pullRequestURL(pr),
+			"apiUrl":          pr.URL,
+			"raw":             pr,
+		}
+		if showDiff {
+			payload["gitDiff"] = fileDiffs
+		}
+		if err := output.PrintJSON(ctx.stdout, payload); err != nil {
+			output.WriteError(ctx.stderr, err, ctx.jsonMode)
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintf(ctx.stdout, "PullRequestID: %d\n", pr.PullRequestID)
+	fmt.Fprintf(ctx.stdout, "Repository: %s\n", pr.Repository.Name)
+	fmt.Fprintf(ctx.stdout, "Title: %s\n", pr.Title)
+	fmt.Fprintf(ctx.stdout, "Status: %s\n", pr.Status)
+	if author := identityDisplayName(pr.CreatedBy); author != "" {
+		fmt.Fprintf(ctx.stdout, "Author: %s\n", author)
+	}
+	fmt.Fprintf(ctx.stdout, "Branches: %s -> %s\n", shortRef(pr.SourceRefName), shortRef(pr.TargetRefName))
+	fmt.Fprintf(ctx.stdout, "IsDraft: %t\n", pr.IsDraft)
+	if pr.CreationDate != "" {
+		fmt.Fprintf(ctx.stdout, "Created: %s\n", pr.CreationDate)
+	}
+	fmt.Fprintln(ctx.stdout)
+
+	if strings.TrimSpace(pr.Description) != "" {
+		fmt.Fprintln(ctx.stdout, "Description:")
+		fmt.Fprintln(ctx.stdout, pr.Description)
+		fmt.Fprintln(ctx.stdout)
+	}
+
+	if len(workItems) > 0 {
+		fmt.Fprintln(ctx.stdout, "Work Items:")
+		output.PrintTable(ctx.stdout, workItems)
+		fmt.Fprintln(ctx.stdout)
+	} else {
+		fmt.Fprintln(ctx.stdout, "Work Items: none")
+		fmt.Fprintln(ctx.stdout)
+	}
+
+	activeThreads := 0
+	for _, thread := range threads {
+		if thread.IsDeleted {
+			continue
+		}
+		activeThreads++
+	}
+	if activeThreads > 0 {
+		fmt.Fprintln(ctx.stdout, "Comments:")
+		for _, thread := range threads {
+			if thread.IsDeleted {
+				continue
+			}
+			threadLabel := fmt.Sprintf("Thread %d", thread.ID)
+			if thread.Status != "" {
+				threadLabel += " [" + thread.Status + "]"
+			}
+			fmt.Fprintf(ctx.stdout, "  %s\n", threadLabel)
+			for _, comment := range thread.Comments {
+				if comment.IsDeleted || strings.TrimSpace(comment.Content) == "" {
+					continue
+				}
+				author := identityDisplayName(comment.Author)
+				date := comment.PublishedDate
+				if date == "" {
+					date = comment.LastUpdatedDate
+				}
+				prefix := author
+				if date != "" {
+					prefix = fmt.Sprintf("%s (%s)", author, date)
+				}
+				fmt.Fprintf(ctx.stdout, "    %s: %s\n", prefix, comment.Content)
+			}
+		}
+		fmt.Fprintln(ctx.stdout)
+	} else {
+		fmt.Fprintln(ctx.stdout, "Comments: none")
+		fmt.Fprintln(ctx.stdout)
+	}
+
+	if showDiff {
+		renderGitDiffText(ctx.stdout, fileDiffs)
+	}
+
+	fmt.Fprintf(ctx.stdout, "URL: %s\n", pullRequestURL(pr))
+	return 0
+}
+
+func renderGitDiffText(w io.Writer, fileDiffs []FileDiff) {
+	if len(fileDiffs) == 0 {
+		fmt.Fprintln(w, "Git Diff: no changes")
+		fmt.Fprintln(w)
+		return
+	}
+
+	addCount, editCount, delCount := 0, 0, 0
+	for _, fd := range fileDiffs {
+		switch strings.ToLower(fd.ChangeType) {
+		case "add":
+			addCount++
+		case "edit":
+			editCount++
+		case "delete":
+			delCount++
+		}
+	}
+
+	var summary []string
+	if addCount > 0 {
+		summary = append(summary, fmt.Sprintf("%d add", addCount))
+	}
+	if editCount > 0 {
+		summary = append(summary, fmt.Sprintf("%d edit", editCount))
+	}
+	if delCount > 0 {
+		summary = append(summary, fmt.Sprintf("%d delete", delCount))
+	}
+	summaryStr := ""
+	if len(summary) > 0 {
+		summaryStr = ", " + strings.Join(summary, ", ")
+	}
+	fmt.Fprintf(w, "Git Diff (%d files changed%s):\n", len(fileDiffs), summaryStr)
+
+	for _, fd := range fileDiffs {
+		changeType := fd.ChangeType
+		if changeType == "" {
+			changeType = "edit"
+		}
+		path := fd.Path
+		if path == "" {
+			path = "(unknown path)"
+		}
+		fmt.Fprintf(w, "\n%s %s\n", changeTypeLabel(changeType), path)
+		if fd.Error != "" {
+			fmt.Fprintf(w, "  (error: %s)\n", fd.Error)
+		} else if strings.TrimSpace(fd.Diff) != "" {
+			fmt.Fprint(w, fd.Diff)
+			if !strings.HasSuffix(fd.Diff, "\n") {
+				fmt.Fprintln(w)
+			}
+		}
+	}
+	fmt.Fprintln(w)
+}
+
+func changeTypeLabel(ct string) string {
+	switch strings.ToLower(ct) {
+	case "add":
+		return "A"
+	case "edit":
+		return "M"
+	case "delete":
+		return "D"
+	case "rename":
+		return "R"
+	default:
+		return strings.ToUpper(ct[:1])
+	}
+}
+
+type FileDiff struct {
+	ChangeType string `json:"changeType"`
+	Path       string `json:"path"`
+	Diff       string `json:"diff,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+func fetchPullRequestDiffs(ctx context.Context, client *api.Client, repository string, pr api.GitPullRequest, verbose bool, stderr io.Writer) ([]FileDiff, error) {
+	iterations, err := client.GetPullRequestIterations(ctx, repository, pr.PullRequestID)
+	if err != nil {
+		return nil, err
+	}
+	if len(iterations) == 0 {
+		return nil, errs.New("no_iterations", "pull request has no iterations", nil)
+	}
+
+	latest := iterations[0]
+	for _, it := range iterations[1:] {
+		if it.ID > latest.ID {
+			latest = it
+		}
+	}
+
+	changes, err := client.GetPullRequestIterationChanges(ctx, repository, pr.PullRequestID, latest.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	baseVersion := ""
+	targetVersion := ""
+	baseVersionType := "commit"
+	if pr.LastMergeTargetCommit != nil && pr.LastMergeTargetCommit.CommitID != "" {
+		baseVersion = pr.LastMergeTargetCommit.CommitID
+	} else if latest.TargetRefCommit != nil && latest.TargetRefCommit.CommitID != "" {
+		baseVersion = latest.TargetRefCommit.CommitID
+	} else {
+		baseVersion = shortRef(pr.TargetRefName)
+		baseVersionType = "branch"
+	}
+	if pr.LastMergeSourceCommit != nil && pr.LastMergeSourceCommit.CommitID != "" {
+		targetVersion = pr.LastMergeSourceCommit.CommitID
+	} else if latest.SourceRefCommit != nil && latest.SourceRefCommit.CommitID != "" {
+		targetVersion = latest.SourceRefCommit.CommitID
+	} else {
+		targetVersion = shortRef(pr.SourceRefName)
+	}
+
+	fileDiffs := make([]FileDiff, 0, len(changes))
+	for _, change := range changes {
+		if change.Item.GitObjectType == "tree" {
+			continue
+		}
+		path := change.Item.Path
+		changeType := strings.ToLower(change.ChangeType)
+		if changeType == "" {
+			changeType = "edit"
+		}
+
+		fd := FileDiff{ChangeType: changeType, Path: path}
+
+		var oldContent, newContent string
+		var fetchErr error
+
+		switch changeType {
+		case "add":
+			newContent, fetchErr = client.GetItemContent(ctx, repository, path, "commit", targetVersion)
+			if fetchErr != nil {
+				fd.Error = fmt.Sprintf("could not fetch new content: %v", fetchErr)
+			}
+		case "delete":
+			oldContent, fetchErr = client.GetItemContent(ctx, repository, path, baseVersionType, baseVersion)
+			if fetchErr != nil {
+				fd.Error = fmt.Sprintf("could not fetch old content: %v", fetchErr)
+			}
+		default:
+			oldContent, fetchErr = client.GetItemContent(ctx, repository, path, baseVersionType, baseVersion)
+			if fetchErr != nil && verbose {
+				fmt.Fprintf(stderr, "  warning: could not fetch old content for %s: %v\n", path, fetchErr)
+			}
+			newContent, fetchErr = client.GetItemContent(ctx, repository, path, "commit", targetVersion)
+			if fetchErr != nil && verbose {
+				fmt.Fprintf(stderr, "  warning: could not fetch new content for %s: %v\n", path, fetchErr)
+			}
+		}
+
+		if fd.Error == "" {
+			fd.Diff = diff.UnifiedDiff(oldContent, newContent)
+		}
+
+		fileDiffs = append(fileDiffs, fd)
+	}
+
+	return fileDiffs, nil
+}
+
+func parsePullRequestURL(rawURL string) (pullRequestLocator, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return pullRequestLocator{}, errs.New("invalid_url", "could not parse URL", err.Error())
+	}
+	segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	gitIdx := -1
+	for i, seg := range segments {
+		if seg == "_git" {
+			gitIdx = i
+			break
+		}
+	}
+	if gitIdx < 0 || gitIdx == 0 {
+		return pullRequestLocator{}, errs.New("invalid_url", "URL must contain /<project>/_git/<repo>/pullrequest/<id>", rawURL)
+	}
+	project := segments[gitIdx-1]
+	baseSegments := segments[:gitIdx-1]
+	baseURL := parsed.Scheme + "://" + parsed.Host
+	if len(baseSegments) > 0 {
+		baseURL += "/" + strings.Join(baseSegments, "/")
+	}
+
+	if gitIdx+1 >= len(segments) {
+		return pullRequestLocator{}, errs.New("invalid_url", "URL missing repository name after _git", rawURL)
+	}
+	repository := segments[gitIdx+1]
+
+	prIdx := -1
+	for i := gitIdx + 2; i < len(segments); i++ {
+		if segments[i] == "pullrequest" || segments[i] == "pullrequests" {
+			prIdx = i
+			break
+		}
+	}
+	if prIdx < 0 || prIdx+1 >= len(segments) {
+		return pullRequestLocator{}, errs.New("invalid_url", "URL missing pullrequest/<id> segment", rawURL)
+	}
+	prID, err := strconv.Atoi(segments[prIdx+1])
+	if err != nil || prID <= 0 {
+		return pullRequestLocator{}, errs.New("invalid_url", "pull request id must be a positive number", segments[prIdx+1])
+	}
+
+	return pullRequestLocator{
+		BaseURL:        baseURL,
+		Project:        project,
+		Repository:     repository,
+		PullRequestID: prID,
+	}, nil
+}
+
+type pullRequestLocator struct {
+	BaseURL        string
+	Project        string
+	Repository     string
+	PullRequestID int
+}
+
+func isURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+func shortRef(ref string) string {
+	if strings.HasPrefix(ref, "refs/heads/") {
+		return strings.TrimPrefix(ref, "refs/heads/")
+	}
+	return ref
+}
+
+func identityDisplayName(ref map[string]interface{}) string {
+	if ref == nil {
+		return ""
+	}
+	if dn, ok := ref["displayName"].(string); ok && dn != "" {
+		return dn
+	}
+	if un, ok := ref["uniqueName"].(string); ok && un != "" {
+		return un
+	}
+	return ""
+}
+
+func prShowValueFlags() map[string]bool {
+	flags := wiqlValueFlags()
+	flags["repository"] = true
+	flags["max-threads"] = true
+	return flags
+}
+
+func prCommentValueFlags() map[string]bool {
+	flags := wiqlValueFlags()
+	flags["repository"] = true
+	flags["content"] = true
+	flags["content-file"] = true
+	flags["status"] = true
+	return flags
 }
 
 func collectIDs(resp api.WiqlResponse) []int {
@@ -1692,6 +2357,8 @@ func printUsage(w io.Writer) {
 		"  tfs create --type \"<WorkItemType>\" --title \"<Title>\" [--set \"Field=Value\"...] [--assigned-to \"Owner\"] [--parent <id>] [--json]  Create a work item.",
 		"  tfs delete <id> --yes [--destroy] [--json]                         Delete a work item; --destroy attempts permanent removal.",
 		"  tfs pr create --repository \"<Repo>\" --source \"<Branch>\" --target \"<Branch>\" --title \"<Title>\" [--description \"<Text>\"] [--draft] [--work-item <ID> ...] [--auto-complete] [--json]  Create a pull request.",
+		"  tfs pr show <URL | ID> [--repository \"<Repo>\"] [--max-threads N] [--git-diff] [--json]  Show pull request details: repo, branches, title, work items, comments, optional git diff.",
+		"  tfs pr comment <URL | ID> --content \"<text>\" [--repository \"<Repo>\"] [--status active|resolved|closed] [--json]  Post a comment thread on a pull request. Use --content - for stdin or --content-file <path> for file input.",
 		"  tfs search --query \"<text>\" [--project P] [--top N] [--json]     Search by Title/Description.",
 		"  tfs my [--top N] [--type \"<Type>\"] [--exclude-state \"<State>\"] [--all-states] [--json]  List my items in the current project (default states: Разработка, Выполняется).",
 		"  tfs show <id> [--children-rel <rel>] [--max-children N] [--json]  Show details and child items.",

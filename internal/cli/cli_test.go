@@ -159,3 +159,134 @@ func TestResourceRefIDs(t *testing.T) {
 		t.Fatalf("unexpected resource ref ids: %#v", ids)
 	}
 }
+
+func TestParsePullRequestURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantBase string
+		wantProj string
+		wantRepo string
+		wantID   int
+	}{
+		{
+			name:     "on-prem with collection and query",
+			input:    "https://tfs.example.com/DefaultCollection/Project/_git/repo-name/pullrequest/37456?_a=overview",
+			wantBase: "https://tfs.example.com/DefaultCollection",
+			wantProj: "Project",
+			wantRepo: "repo-name",
+			wantID:   37456,
+		},
+		{
+			name:     "on-prem no query",
+			input:    "https://tfs.example.com/DefaultCollection/Project/_git/repo-name/pullrequest/37456",
+			wantBase: "https://tfs.example.com/DefaultCollection",
+			wantProj: "Project",
+			wantRepo: "repo-name",
+			wantID:   37456,
+		},
+		{
+			name:     "azure devops services",
+			input:    "https://dev.azure.com/org/project/_git/repo/pullrequest/42",
+			wantBase: "https://dev.azure.com/org",
+			wantProj: "project",
+			wantRepo: "repo",
+			wantID:   42,
+		},
+		{
+			name:     "plural pullrequests segment",
+			input:    "https://tfs.example.com/DefaultCollection/Project/_git/repo-name/pullrequests/99",
+			wantBase: "https://tfs.example.com/DefaultCollection",
+			wantProj: "Project",
+			wantRepo: "repo-name",
+			wantID:   99,
+		},
+		{
+			name:     "no collection in path",
+			input:    "https://tfs.example.com/Project/_git/repo/pullrequest/5",
+			wantBase: "https://tfs.example.com",
+			wantProj: "Project",
+			wantRepo: "repo",
+			wantID:   5,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			loc, err := parsePullRequestURL(tc.input)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if loc.BaseURL != tc.wantBase {
+				t.Fatalf("baseURL: got %q, want %q", loc.BaseURL, tc.wantBase)
+			}
+			if loc.Project != tc.wantProj {
+				t.Fatalf("project: got %q, want %q", loc.Project, tc.wantProj)
+			}
+			if loc.Repository != tc.wantRepo {
+				t.Fatalf("repository: got %q, want %q", loc.Repository, tc.wantRepo)
+			}
+			if loc.PullRequestID != tc.wantID {
+				t.Fatalf("prID: got %d, want %d", loc.PullRequestID, tc.wantID)
+			}
+		})
+	}
+}
+
+func TestParsePullRequestURLInvalid(t *testing.T) {
+	tests := []string{
+		"not-a-url",
+		"https://tfs.example.com/DefaultCollection/Project/_git/repo-name",
+		"https://tfs.example.com/DefaultCollection/Project/_git/repo-name/pullrequest/",
+		"https://tfs.example.com/DefaultCollection/Project/_git/repo-name/pullrequest/abc",
+		"https://tfs.example.com/_git/repo/pullrequest/1",
+	}
+	for _, input := range tests {
+		_, err := parsePullRequestURL(input)
+		if err == nil {
+			t.Fatalf("expected error for %q", input)
+		}
+	}
+}
+
+func TestIsURL(t *testing.T) {
+	if !isURL("https://example.com") {
+		t.Fatalf("expected https URL to be detected")
+	}
+	if !isURL("http://example.com") {
+		t.Fatalf("expected http URL to be detected")
+	}
+	if isURL("37456") {
+		t.Fatalf("expected bare id not to be detected as URL")
+	}
+	if isURL("--flag") {
+		t.Fatalf("expected flag not to be detected as URL")
+	}
+}
+
+func TestShortRef(t *testing.T) {
+	if got := shortRef("refs/heads/feature/xyz"); got != "feature/xyz" {
+		t.Fatalf("unexpected short ref: %s", got)
+	}
+	if got := shortRef("refs/heads/develop"); got != "develop" {
+		t.Fatalf("unexpected short ref: %s", got)
+	}
+	if got := shortRef("refs/tags/v1.0"); got != "refs/tags/v1.0" {
+		t.Fatalf("unexpected short ref: %s", got)
+	}
+	if got := shortRef(""); got != "" {
+		t.Fatalf("unexpected short ref: %s", got)
+	}
+}
+
+func TestIdentityDisplayName(t *testing.T) {
+	if got := identityDisplayName(map[string]interface{}{"displayName": "John Doe", "uniqueName": "john@example.com"}); got != "John Doe" {
+		t.Fatalf("unexpected display name: %s", got)
+	}
+	if got := identityDisplayName(map[string]interface{}{"uniqueName": "john@example.com"}); got != "john@example.com" {
+		t.Fatalf("unexpected display name: %s", got)
+	}
+	if got := identityDisplayName(nil); got != "" {
+		t.Fatalf("unexpected display name: %s", got)
+	}
+}

@@ -239,6 +239,170 @@ func (c *Client) UpdatePullRequest(ctx context.Context, repository string, pullR
 	return pr, nil
 }
 
+func (c *Client) GetPullRequest(ctx context.Context, repository string, pullRequestID int) (GitPullRequest, error) {
+	if strings.TrimSpace(repository) == "" {
+		return GitPullRequest{}, errs.New("invalid_args", "repository is required", nil)
+	}
+	if pullRequestID <= 0 {
+		return GitPullRequest{}, errs.New("invalid_args", "pull request id must be positive", nil)
+	}
+	path := fmt.Sprintf("%s/_apis/git/repositories/%s/pullrequests/%d", c.project, url.PathEscape(repository), pullRequestID)
+	params := url.Values{}
+	params.Set("api-version", defaultAPIVersion)
+	respBody, err := c.do(ctx, http.MethodGet, path, params, nil, "")
+	if err != nil {
+		return GitPullRequest{}, err
+	}
+	var pr GitPullRequest
+	if err := json.Unmarshal(respBody, &pr); err != nil {
+		return GitPullRequest{}, err
+	}
+	return pr, nil
+}
+
+func (c *Client) GetPullRequestThreads(ctx context.Context, repository string, pullRequestID int) ([]GitPullRequestThread, error) {
+	if strings.TrimSpace(repository) == "" {
+		return nil, errs.New("invalid_args", "repository is required", nil)
+	}
+	if pullRequestID <= 0 {
+		return nil, errs.New("invalid_args", "pull request id must be positive", nil)
+	}
+	path := fmt.Sprintf("%s/_apis/git/repositories/%s/pullrequests/%d/threads", c.project, url.PathEscape(repository), pullRequestID)
+	params := url.Values{}
+	params.Set("api-version", defaultAPIVersion)
+	respBody, err := c.do(ctx, http.MethodGet, path, params, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var resp GitPullRequestThreadsResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Value, nil
+}
+
+func (c *Client) CreatePullRequestThread(ctx context.Context, repository string, pullRequestID int, req CreatePullRequestThreadRequest) (GitPullRequestThread, error) {
+	if strings.TrimSpace(repository) == "" {
+		return GitPullRequestThread{}, errs.New("invalid_args", "repository is required", nil)
+	}
+	if pullRequestID <= 0 {
+		return GitPullRequestThread{}, errs.New("invalid_args", "pull request id must be positive", nil)
+	}
+	path := fmt.Sprintf("%s/_apis/git/repositories/%s/pullrequests/%d/threads", c.project, url.PathEscape(repository), pullRequestID)
+	params := url.Values{}
+	params.Set("api-version", defaultAPIVersion)
+	body, err := json.Marshal(req)
+	if err != nil {
+		return GitPullRequestThread{}, err
+	}
+	respBody, err := c.do(ctx, http.MethodPost, path, params, body, "application/json")
+	if err != nil {
+		return GitPullRequestThread{}, err
+	}
+	var thread GitPullRequestThread
+	if err := json.Unmarshal(respBody, &thread); err != nil {
+		return GitPullRequestThread{}, err
+	}
+	return thread, nil
+}
+
+func (c *Client) GetPullRequestWorkItems(ctx context.Context, repository string, pullRequestID int) ([]ResourceRef, error) {
+	if strings.TrimSpace(repository) == "" {
+		return nil, errs.New("invalid_args", "repository is required", nil)
+	}
+	if pullRequestID <= 0 {
+		return nil, errs.New("invalid_args", "pull request id must be positive", nil)
+	}
+	path := fmt.Sprintf("%s/_apis/git/repositories/%s/pullrequests/%d/workitems", c.project, url.PathEscape(repository), pullRequestID)
+	params := url.Values{}
+	params.Set("api-version", defaultAPIVersion)
+	respBody, err := c.do(ctx, http.MethodGet, path, params, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var resp GitPullRequestWorkItemsResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		var refs []ResourceRef
+		if arrErr := json.Unmarshal(respBody, &refs); arrErr != nil {
+			return nil, err
+		}
+		return refs, nil
+	}
+	return resp.Value, nil
+}
+
+func (c *Client) GetPullRequestIterations(ctx context.Context, repository string, pullRequestID int) ([]GitPullRequestIteration, error) {
+	if strings.TrimSpace(repository) == "" {
+		return nil, errs.New("invalid_args", "repository is required", nil)
+	}
+	if pullRequestID <= 0 {
+		return nil, errs.New("invalid_args", "pull request id must be positive", nil)
+	}
+	path := fmt.Sprintf("%s/_apis/git/repositories/%s/pullrequests/%d/iterations", c.project, url.PathEscape(repository), pullRequestID)
+	params := url.Values{}
+	params.Set("api-version", defaultAPIVersion)
+	respBody, err := c.do(ctx, http.MethodGet, path, params, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var resp GitPullRequestIterationsResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Value, nil
+}
+
+func (c *Client) GetPullRequestIterationChanges(ctx context.Context, repository string, pullRequestID, iterationID int) ([]GitChange, error) {
+	if strings.TrimSpace(repository) == "" {
+		return nil, errs.New("invalid_args", "repository is required", nil)
+	}
+	if pullRequestID <= 0 {
+		return nil, errs.New("invalid_args", "pull request id must be positive", nil)
+	}
+	if iterationID <= 0 {
+		return nil, errs.New("invalid_args", "iteration id must be positive", nil)
+	}
+	path := fmt.Sprintf("%s/_apis/git/repositories/%s/pullrequests/%d/iterations/%d/changes", c.project, url.PathEscape(repository), pullRequestID, iterationID)
+	params := url.Values{}
+	params.Set("api-version", defaultAPIVersion)
+	respBody, err := c.do(ctx, http.MethodGet, path, params, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var resp GitPullRequestIterationChanges
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, err
+	}
+	return resp.ChangeEntries, nil
+}
+
+func (c *Client) GetItemContent(ctx context.Context, repository, path, versionType, version string) (string, error) {
+	if strings.TrimSpace(repository) == "" {
+		return "", errs.New("invalid_args", "repository is required", nil)
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", errs.New("invalid_args", "path is required", nil)
+	}
+	apiPath := fmt.Sprintf("%s/_apis/git/repositories/%s/items", c.project, url.PathEscape(repository))
+	params := url.Values{}
+	params.Set("api-version", defaultAPIVersion)
+	params.Set("path", path)
+	params.Set("includeContent", "true")
+	if versionType != "" && version != "" {
+		params.Set("versionDescriptor.versionType", versionType)
+		params.Set("versionDescriptor.version", version)
+	}
+	respBody, err := c.do(ctx, http.MethodGet, apiPath, params, nil, "")
+	if err != nil {
+		return "", err
+	}
+	var item GitItem
+	if err := json.Unmarshal(respBody, &item); err != nil {
+		return "", err
+	}
+	return item.Content, nil
+}
+
 func (c *Client) ProfileMe(ctx context.Context) (Profile, error) {
 	base := c.profileBaseURL()
 	path := joinURL(base, "_apis/profile/profiles/me")

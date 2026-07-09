@@ -119,12 +119,93 @@ type GitPullRequest struct {
 	TargetRefName     string                           `json:"targetRefName"`
 	IsDraft           bool                             `json:"isDraft"`
 	URL               string                           `json:"url"`
+	CreationDate      string                           `json:"creationDate,omitempty"`
 	Repository        GitRepository                    `json:"repository"`
 	Links             map[string]Link                  `json:"_links"`
-	CreatedBy         map[string]interface{}           `json:"createdBy"`
-	AutoCompleteSetBy *IdentityRef                     `json:"autoCompleteSetBy,omitempty"`
-	CompletionOptions *GitPullRequestCompletionOptions `json:"completionOptions,omitempty"`
-	WorkItemRefs      []ResourceRef                    `json:"workItemRefs,omitempty"`
+	CreatedBy               map[string]interface{}           `json:"createdBy"`
+	AutoCompleteSetBy       *IdentityRef                     `json:"autoCompleteSetBy,omitempty"`
+	CompletionOptions       *GitPullRequestCompletionOptions `json:"completionOptions,omitempty"`
+	WorkItemRefs            []ResourceRef                    `json:"workItemRefs,omitempty"`
+	LastMergeSourceCommit   *GitCommitRef                    `json:"lastMergeSourceCommit,omitempty"`
+	LastMergeTargetCommit   *GitCommitRef                    `json:"lastMergeTargetCommit,omitempty"`
+}
+
+type GitCommitRef struct {
+	CommitID string `json:"commitId"`
+	URL      string `json:"url"`
+}
+
+type GitChangeItem struct {
+	ObjectID         string `json:"objectId,omitempty"`
+	OriginalObjectID string `json:"originalObjectId,omitempty"`
+	GitObjectType    string `json:"gitObjectType,omitempty"`
+	CommitID         string `json:"commitId,omitempty"`
+	Path             string `json:"path,omitempty"`
+	URL              string `json:"url,omitempty"`
+}
+
+type GitChange struct {
+	ChangeID         int           `json:"changeId"`
+	ChangeType       string        `json:"changeType"`
+	Item             GitChangeItem `json:"item"`
+	ChangeTrackingID int           `json:"changeTrackingId,omitempty"`
+	Patch            string        `json:"patch,omitempty"`
+}
+
+type GitPullRequestIteration struct {
+	ID           int          `json:"id"`
+	CreatedDate  string       `json:"createdDate,omitempty"`
+	SourceRefCommit *GitCommitRef `json:"sourceRefCommit,omitempty"`
+	TargetRefCommit *GitCommitRef `json:"targetRefCommit,omitempty"`
+}
+
+type GitPullRequestIterationsResponse struct {
+	Count int                       `json:"count"`
+	Value []GitPullRequestIteration `json:"value"`
+}
+
+type GitPullRequestIterationChanges struct {
+	ChangeEntries []GitChange `json:"changeEntries"`
+}
+
+type GitItem struct {
+	ObjectID      string `json:"objectId,omitempty"`
+	GitObjectType string `json:"gitObjectType,omitempty"`
+	CommitID      string `json:"commitId,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Content       string `json:"content,omitempty"`
+	URL           string `json:"url,omitempty"`
+}
+
+type GitPullRequestComment struct {
+	ID              int                    `json:"id"`
+	Content         string                 `json:"content"`
+	CommentType     string                 `json:"commentType"`
+	Author          map[string]interface{} `json:"author"`
+	PublishedDate   string                 `json:"publishedDate,omitempty"`
+	LastUpdatedDate string                 `json:"lastUpdatedDate,omitempty"`
+	IsDeleted       bool                   `json:"isDeleted,omitempty"`
+	ParentCommentID int                    `json:"parentCommentId,omitempty"`
+}
+
+type GitPullRequestThread struct {
+	ID              int                    `json:"id"`
+	Status          string                 `json:"status,omitempty"`
+	IsDeleted       bool                   `json:"isDeleted,omitempty"`
+	Comments        []GitPullRequestComment `json:"comments"`
+	PublishedDate   string                 `json:"publishedDate,omitempty"`
+	LastUpdatedDate string                 `json:"lastUpdatedDate,omitempty"`
+	Context         map[string]interface{} `json:"context,omitempty"`
+}
+
+type GitPullRequestThreadsResponse struct {
+	Count int                    `json:"count"`
+	Value []GitPullRequestThread `json:"value"`
+}
+
+type GitPullRequestWorkItemsResponse struct {
+	Count int           `json:"count"`
+	Value []ResourceRef `json:"value"`
 }
 
 type CreatePullRequestRequest struct {
@@ -145,4 +226,15 @@ type GitPullRequestCompletionOptions struct {
 type UpdatePullRequestRequest struct {
 	AutoCompleteSetBy *IdentityRef                     `json:"autoCompleteSetBy,omitempty"`
 	CompletionOptions *GitPullRequestCompletionOptions `json:"completionOptions,omitempty"`
+}
+
+type CreatePullRequestThreadRequest struct {
+	Comments []CreatePullRequestComment `json:"comments"`
+	Status   int                        `json:"status,omitempty"`
+}
+
+type CreatePullRequestComment struct {
+	ParentCommentID int    `json:"parentCommentId,omitempty"`
+	Content         string `json:"content"`
+	CommentType     int    `json:"commentType,omitempty"`
 }
