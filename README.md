@@ -134,8 +134,18 @@ Create a child task:
 Update fields and add a comment:
 
 ```bash
-./tfs update 123 --set "System.Title=Report generation supports filters" --add-comment "Updated scope"
+./tfs update 123 \
+  --set "System.Title=Report generation supports filters" \
+  --add-comment $'### Updated scope\n\n- Add CSV export\n- Preserve current filters'
 ```
+
+`System.Description`, `Microsoft.VSTS.Common.AcceptanceCriteria`,
+`Microsoft.VSTS.TCM.ReproSteps`, and comments written through `--add-comment`
+are TFS rich-text fields. The CLI renders Markdown supplied for these fields to
+HTML before sending it to TFS, so headings, paragraphs, lists, emphasis, links,
+and inline code retain their structure in the web interface. Existing HTML is
+passed through unchanged. Use real newline characters; in Bash, ANSI-C quoting
+such as `$'line one\n\nline two'` is convenient.
 
 Delete a work item:
 

@@ -479,7 +479,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	addGlobalFlags(fs, &flags)
 	sets := stringSliceFlag{}
 	fs.Var(&sets, "set", "Field=Value (repeatable)")
-	comment := fs.String("add-comment", "", "Add comment to System.History")
+	comment := fs.String("add-comment", "", "Add a Markdown comment to System.History (rendered as HTML)")
 	parent := fs.Int("parent", 0, "Parent work item ID (reparent)")
 	parentRel := fs.String("parent-rel", "System.LinkTypes.Hierarchy-Reverse", "Parent relation type")
 	yes := fs.Bool("yes", false, "Confirm bulk updates (>5 fields)")
@@ -1962,6 +1962,10 @@ func buildPatch(sets []string, comment string) ([]map[string]interface{}, error)
 		if err != nil {
 			return nil, err
 		}
+		value, err = normalizeWorkItemFieldValue(field, value)
+		if err != nil {
+			return nil, err
+		}
 		patch = append(patch, map[string]interface{}{
 			"op":    "add",
 			"path":  "/fields/" + field,
@@ -1969,11 +1973,14 @@ func buildPatch(sets []string, comment string) ([]map[string]interface{}, error)
 		})
 	}
 	if comment != "" {
-		// TODO: confirm System.History as the comment field for API 6.0.
+		renderedComment, err := renderRichText(comment)
+		if err != nil {
+			return nil, err
+		}
 		patch = append(patch, map[string]interface{}{
 			"op":    "add",
 			"path":  "/fields/System.History",
-			"value": comment,
+			"value": renderedComment,
 		})
 	}
 	return patch, nil
@@ -2604,7 +2611,7 @@ func printUsage(w io.Writer) {
 		"Usage:",
 		"  tfs wiql \"<WIQL>\" [--project P] [--top N] [--json]              Run a WIQL query and list matching items.",
 		"  tfs view <id> [--fields f1,f2,...] [--expand relations|all|none] [--json]  Show a work item by ID.",
-		"  tfs update <id> --set \"Field=Value\" ... [--add-comment \"text\"] [--parent <id>] [--parent-rel <rel>] [--json] [--yes]  Update fields/comments/parent.",
+		"  tfs update <id> --set \"Field=Value\" ... [--add-comment \"markdown\"] [--parent <id>] [--parent-rel <rel>] [--json] [--yes]  Update fields/comments/parent; rich-text fields render Markdown as HTML.",
 		"  tfs create --type \"<WorkItemType>\" --title \"<Title>\" [--set \"Field=Value\"...] [--assigned-to \"Owner\"] [--parent <id>] [--json]  Create a work item.",
 		"  tfs delete <id> --yes [--destroy] [--json]                         Delete a work item; --destroy attempts permanent removal.",
 		"  tfs pr create --repository \"<Repo>\" --source \"<Branch>\" --target \"<Branch>\" --title \"<Title>\" [--description \"<Text>\"] [--draft] [--work-item <ID> ...] [--auto-complete] [--json]  Create a pull request.",
