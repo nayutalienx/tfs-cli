@@ -6,11 +6,12 @@ CLI for working with TFS/Azure DevOps Server work items (create, update, delete,
 - Run WIQL and list matching work items.
 - Create, update, and delete work items (including comments).
 - Search by title/description.
-- Show details and child items.
+- Show details, complete comment history, and child items.
 - List work item types and resolve your identity.
 - Create Git pull requests in TFS/Azure DevOps Server.
 - Show Git pull request details by URL or ID (repo, branches, work items, comments).
 - Post comment threads on pull requests (inline, stdin, or file input).
+- Read wiki page metadata and raw Markdown content from a TFS/Azure DevOps browser URL.
 - JSON output by default, with optional text tables.
 
 ## Requirements
@@ -95,6 +96,7 @@ Run `./tfs --help` for the full command list. Main commands:
 - `pr create` - create a Git pull request
 - `pr show` - show pull request details (repo, branches, title, work items, comments)
 - `pr comment` - post a comment thread on a pull request
+- `wiki show` - show a wiki page by browser URL
 - `types` - list work item types
 - `whoami` - show the resolved identity from the PAT
 - `config` - view/set stored config
@@ -197,11 +199,21 @@ echo "Please fix the null check in service.java" | ./tfs pr comment 42 --reposit
 
 The `pr comment` command creates a new comment thread on the pull request. Content can be provided via `--content "text"`, `--content -` (stdin), or `--content-file <path>`. Optional `--status` sets the thread status (active, byDesign, resolved, closed, wontFix, unknown; default: active).
 
-Show details and children:
+Show a wiki page by its browser URL:
+
+```bash
+./tfs wiki show "https://dev.azure.com/your-org/YourProject/_wiki/wikis/YourProject.wiki/1578/Page-title" --json=false
+```
+
+The command accepts both page-ID URLs (`.../<wiki>/1578/Page-title`) and `pagePath` URLs (`.../<wiki>?pagePath=%2FGuides%2FPage`). It prints page metadata followed by the raw Markdown content. JSON output includes the wiki/page identifiers, paths, URLs, page flags, and `content` without duplicating the document body. To prevent sending the configured PAT to another server, the URL must belong to the configured TFS organization or collection; use the matching `--base-url` override when intentionally targeting another configured collection.
+
+Show details, all comments, and children:
 
 ```bash
 ./tfs show 123
 ```
+
+Use `--max-comments N` to limit the number of comments returned; `0` (the default) returns all comments. JSON output contains the comments in the top-level `comments` array.
 
 Search:
 
@@ -246,5 +258,5 @@ Optional integration variables:
 - `TFS_INSECURE` (set to non-empty to skip TLS verification)
 
 ## Notes
-- The CLI uses Azure DevOps REST API version 6.0.
+- The CLI uses Azure DevOps REST API version 6.0; wiki page reads use `6.0-preview.1`, as required by supported on-premises TFS servers.
 - For API background and examples (in Russian), see `tfs_api.md`.

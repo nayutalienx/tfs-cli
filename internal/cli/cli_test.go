@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"tfs-cli/internal/api"
+	"tfs-cli/internal/output"
 )
 
 func TestParseAssignment(t *testing.T) {
@@ -249,6 +250,104 @@ func TestParsePullRequestURLInvalid(t *testing.T) {
 	}
 }
 
+func TestParseWikiPageURLByID(t *testing.T) {
+	rawURL := "https://tfs.solarlab.ru/DefaultCollection/RND/_wiki/wikis/RND.wiki/1578/%D0%9F%D1%80%D0%BE%D0%B2%D0%B5%D1%80%D0%BA%D0%B0-%D0%BA%D0%BE%D1%88%D0%B5%D0%BB%D1%8C%D0%BA%D0%B0"
+	locator, err := parseWikiPageURL(rawURL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if locator.BaseURL != "https://tfs.solarlab.ru/DefaultCollection" {
+		t.Fatalf("unexpected base URL: %s", locator.BaseURL)
+	}
+	if locator.Project != "RND" || locator.WikiIdentifier != "RND.wiki" || locator.PageID != 1578 {
+		t.Fatalf("unexpected locator: %#v", locator)
+	}
+	if locator.PagePath != "" || locator.SourceURL != rawURL {
+		t.Fatalf("unexpected locator source fields: %#v", locator)
+	}
+}
+
+func TestParseWikiPageURLByPath(t *testing.T) {
+	rawURL := "https://dev.azure.com/example-org/RND/_wiki/wikis/Architecture.wiki?pagePath=%2FGuides%2FSource+wallet"
+	locator, err := parseWikiPageURL(rawURL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if locator.BaseURL != "https://dev.azure.com/example-org" || locator.Project != "RND" {
+		t.Fatalf("unexpected collection locator: %#v", locator)
+	}
+	if locator.WikiIdentifier != "Architecture.wiki" || locator.PageID != 0 || locator.PagePath != "/Guides/Source wallet" {
+		t.Fatalf("unexpected page locator: %#v", locator)
+	}
+}
+
+func TestParseWikiPageURLInvalid(t *testing.T) {
+	tests := []string{
+		"not-a-url",
+		"https://tfs.example/DefaultCollection/RND/_wiki/wikis/RND.wiki",
+		"https://tfs.example/DefaultCollection/RND/_wiki/wikis/RND.wiki/not-a-page-id/Page",
+		"https://tfs.example/DefaultCollection/RND/_wiki/wikis/RND.wiki/0/Page",
+		"https://tfs.example/DefaultCollection/RND/_workitems/edit/1578",
+		"https://user@tfs.example/DefaultCollection/RND/_wiki/wikis/RND.wiki/1578/Page",
+	}
+	for _, input := range tests {
+		if _, err := parseWikiPageURL(input); err == nil {
+			t.Fatalf("expected error for %q", input)
+		}
+	}
+}
+
+func TestSameTFSBaseURL(t *testing.T) {
+	if !sameTFSBaseURL("https://TFS.example/DefaultCollection/", "https://tfs.example/defaultcollection") {
+		t.Fatal("expected matching TFS base URLs")
+	}
+	if sameTFSBaseURL("https://tfs.example/DefaultCollection", "https://evil.example/DefaultCollection") {
+		t.Fatal("expected different hosts to be rejected")
+	}
+	if sameTFSBaseURL("https://tfs.example/DefaultCollection", "https://tfs.example/OtherCollection") {
+		t.Fatal("expected different collections to be rejected")
+	}
+}
+
+func TestRenderWikiPageText(t *testing.T) {
+	var stdout bytes.Buffer
+	ctx := commandContext{stdout: &stdout, stderr: &bytes.Buffer{}}
+	locator := wikiPageLocator{WikiIdentifier: "RND.wiki", PageID: 1578, SourceURL: "https://tfs.example/wiki-page"}
+	page := api.WikiPage{
+		Path:        "/Source wallet check",
+		GitItemPath: "/Source-wallet-check.md",
+		Content:     "# Source wallet check\n\nRules.",
+	}
+
+	if code := renderWikiPage(ctx, locator, page); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	text := stdout.String()
+	for _, expected := range []string{"Wiki: RND.wiki", "PageID: 1578", "Path: /Source wallet check", "GitItemPath: /Source-wallet-check.md", "Content:\n# Source wallet check\n\nRules."} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("rendered output missing %q:\n%s", expected, text)
+		}
+	}
+}
+
+func TestRenderWikiPageJSONIncludesContentOnce(t *testing.T) {
+	var stdout bytes.Buffer
+	ctx := commandContext{jsonMode: true, stdout: &stdout, stderr: &bytes.Buffer{}}
+	locator := wikiPageLocator{WikiIdentifier: "RND.wiki", PageID: 1578, SourceURL: "https://tfs.example/wiki-page"}
+	page := api.WikiPage{ID: 1578, Path: "/Page", Content: "unique document body"}
+
+	if code := renderWikiPage(ctx, locator, page); code != 0 {
+		t.Fatalf("unexpected exit code: %d", code)
+	}
+	text := stdout.String()
+	if count := strings.Count(text, "unique document body"); count != 1 {
+		t.Fatalf("content occurred %d times, want exactly once: %s", count, text)
+	}
+	if strings.Contains(text, `"raw"`) {
+		t.Fatalf("JSON output should not duplicate the page in a raw field: %s", text)
+	}
+}
+
 func TestIsURL(t *testing.T) {
 	if !isURL("https://example.com") {
 		t.Fatalf("expected https URL to be detected")
@@ -288,5 +387,58 @@ func TestIdentityDisplayName(t *testing.T) {
 	}
 	if got := identityDisplayName(nil); got != "" {
 		t.Fatalf("unexpected display name: %s", got)
+	}
+	if got := identityDisplayName(map[string]interface{}{"name": "Legacy User <legacy@example.com>"}); got != "Legacy User <legacy@example.com>" {
+		t.Fatalf("unexpected legacy name: %s", got)
+	}
+}
+
+func TestPrintWorkItemDetailsIncludesAllComments(t *testing.T) {
+	title := "Example item"
+	wiType := "Feature"
+	state := "Active"
+	wi := output.WorkItem{
+		ID:    42,
+		Title: &title,
+		Type:  &wiType,
+		State: &state,
+	}
+	comments := []api.WorkItemComment{
+		{
+			Revision:    2,
+			Text:        "first line\nsecond line",
+			RevisedBy:   map[string]interface{}{"displayName": "First User"},
+			RevisedDate: "2026-07-20T10:00:00Z",
+		},
+		{
+			Revision:  5,
+			Text:      "latest comment",
+			RevisedBy: map[string]interface{}{"name": "Legacy User"},
+		},
+	}
+
+	var rendered bytes.Buffer
+	printWorkItemDetails(&rendered, wi, map[string]interface{}{
+		"System.Description": "Description text",
+		"System.History":     "latest comment",
+	}, comments, nil)
+
+	text := rendered.String()
+	for _, expected := range []string{
+		"Description text",
+		"Comments:",
+		"revision 2 | First User | 2026-07-20T10:00:00Z",
+		"first line",
+		"second line",
+		"revision 5 | Legacy User",
+		"latest comment",
+		"Children: none",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("rendered output missing %q:\n%s", expected, text)
+		}
+	}
+	if strings.Contains(text, "Comment (latest):") {
+		t.Fatalf("latest comment should not be printed separately:\n%s", text)
 	}
 }

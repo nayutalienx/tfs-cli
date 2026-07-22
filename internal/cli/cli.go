@@ -99,6 +99,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runShow(args[1:], stdout, stderr)
 	case "pr":
 		return runPR(args[1:], stdout, stderr)
+	case "wiki":
+		return runWiki(args[1:], stdout, stderr)
 	case "types":
 		return runTypes(args[1:], stdout, stderr)
 	case "whoami":
@@ -109,6 +111,75 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		output.WriteError(stderr, errs.New("unknown_command", "unknown command", args[0]), true)
 		return 1
 	}
+}
+
+func runWiki(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		output.WriteError(stderr, errs.New("invalid_args", "wiki subcommand is required", nil), true)
+		return 1
+	}
+	switch args[0] {
+	case "show":
+		return runWikiShow(args[1:], stdout, stderr)
+	default:
+		output.WriteError(stderr, errs.New("unknown_command", "unknown wiki subcommand", args[0]), true)
+		return 1
+	}
+}
+
+func runWikiShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("wiki show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	flags := globalFlags{}
+	addGlobalFlags(fs, &flags)
+	rawURL, rest := splitPositional(args, wiqlValueFlags())
+	if err := fs.Parse(rest); err != nil {
+		return 1
+	}
+	if rawURL == "" {
+		output.WriteError(stderr, errs.New("invalid_args", "wiki page URL is required", nil), flags.json)
+		return 1
+	}
+
+	locator, err := parseWikiPageURL(rawURL)
+	if err != nil {
+		output.WriteError(stderr, err, flags.json)
+		return 1
+	}
+	ctx, err := buildContext(flags, stdout, stderr)
+	if err != nil {
+		output.WriteError(stderr, err, flags.json)
+		return 1
+	}
+	if strings.TrimSpace(ctx.baseURL) == "" {
+		output.WriteError(stderr, errs.New("config_missing", "base URL is required", nil), ctx.jsonMode)
+		return 1
+	}
+	if !sameTFSBaseURL(ctx.baseURL, locator.BaseURL) {
+		output.WriteError(stderr, errs.New("invalid_url", "wiki URL must belong to the configured TFS base URL", map[string]string{
+			"configuredBaseUrl": ctx.baseURL,
+			"wikiBaseUrl":       locator.BaseURL,
+		}), ctx.jsonMode)
+		return 1
+	}
+
+	client, err := api.NewClient(locator.BaseURL, locator.Project, ctx.pat, ctx.insecure, ctx.verbose, stderr)
+	if err != nil {
+		output.WriteError(stderr, err, ctx.jsonMode)
+		return 1
+	}
+
+	var page api.WikiPage
+	if locator.PageID > 0 {
+		page, err = client.GetWikiPageByID(context.Background(), locator.WikiIdentifier, locator.PageID)
+	} else {
+		page, err = client.GetWikiPageByPath(context.Background(), locator.WikiIdentifier, locator.PagePath)
+	}
+	if err != nil {
+		output.WriteError(stderr, err, ctx.jsonMode)
+		return 1
+	}
+	return renderWikiPage(ctx, locator, page)
 }
 
 func runWiql(args []string, stdout, stderr io.Writer) int {
@@ -312,6 +383,7 @@ func runShow(args []string, stdout, stderr io.Writer) int {
 	addGlobalFlags(fs, &flags)
 	childrenRel := fs.String("children-rel", "System.LinkTypes.Hierarchy-Forward", "Relation type used for children")
 	maxChildren := fs.Int("max-children", 20, "Maximum number of children to show")
+	maxComments := fs.Int("max-comments", 0, "Maximum number of comments to show (0 = all)")
 	idArg, rest := splitPositional(args, showValueFlags())
 	if err := fs.Parse(rest); err != nil {
 		return 1
@@ -323,6 +395,10 @@ func runShow(args []string, stdout, stderr io.Writer) int {
 	id, err := strconv.Atoi(idArg)
 	if err != nil {
 		output.WriteError(stderr, errs.New("invalid_args", "work item id must be a number", nil), flags.json)
+		return 1
+	}
+	if *maxComments < 0 {
+		output.WriteError(stderr, errs.New("invalid_args", "maximum comments must not be negative", *maxComments), flags.json)
 		return 1
 	}
 	ctx, err := buildContext(flags, stdout, stderr)
@@ -361,6 +437,11 @@ func runShow(args []string, stdout, stderr io.Writer) int {
 		wi.Relations = relWI.Relations
 	}
 	normalized := output.NormalizeWorkItem(wi)
+	comments, err := client.GetWorkItemComments(context.Background(), id, *maxComments)
+	if err != nil {
+		output.WriteError(stderr, err, ctx.jsonMode)
+		return 1
+	}
 	childrenIDs := extractRelationIDs(wi.Relations, *childrenRel)
 	if *maxChildren > 0 && len(childrenIDs) > *maxChildren {
 		childrenIDs = childrenIDs[:*maxChildren]
@@ -377,6 +458,7 @@ func runShow(args []string, stdout, stderr io.Writer) int {
 	if ctx.jsonMode {
 		payload := map[string]interface{}{
 			"workItem": normalized,
+			"comments": comments,
 			"children": children,
 			"raw":      wi,
 		}
@@ -386,7 +468,7 @@ func runShow(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	printWorkItemDetails(ctx.stdout, normalized, wi.Fields, children)
+	printWorkItemDetails(ctx.stdout, normalized, wi.Fields, comments, children)
 	return 0
 }
 
@@ -1239,6 +1321,51 @@ func renderWorkItem(ctx commandContext, wi api.WorkItem) int {
 	return 0
 }
 
+func renderWikiPage(ctx commandContext, locator wikiPageLocator, page api.WikiPage) int {
+	pageID := page.ID
+	if pageID == 0 {
+		pageID = locator.PageID
+	}
+	pageURL := page.RemoteURL
+	if strings.TrimSpace(pageURL) == "" {
+		pageURL = locator.SourceURL
+	}
+
+	if ctx.jsonMode {
+		payload := map[string]interface{}{
+			"wiki":            locator.WikiIdentifier,
+			"pageId":          pageID,
+			"path":            page.Path,
+			"gitItemPath":     page.GitItemPath,
+			"order":           page.Order,
+			"isParentPage":    page.IsParentPage,
+			"isNonConformant": page.IsNonConformant,
+			"url":             pageURL,
+			"apiUrl":          page.URL,
+			"sourceUrl":       locator.SourceURL,
+			"content":         page.Content,
+		}
+		if err := output.PrintJSON(ctx.stdout, payload); err != nil {
+			output.WriteError(ctx.stderr, err, ctx.jsonMode)
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintf(ctx.stdout, "Wiki: %s\n", locator.WikiIdentifier)
+	if pageID > 0 {
+		fmt.Fprintf(ctx.stdout, "PageID: %d\n", pageID)
+	}
+	fmt.Fprintf(ctx.stdout, "Path: %s\n", page.Path)
+	if page.GitItemPath != "" {
+		fmt.Fprintf(ctx.stdout, "GitItemPath: %s\n", page.GitItemPath)
+	}
+	fmt.Fprintf(ctx.stdout, "URL: %s\n", pageURL)
+	fmt.Fprintln(ctx.stdout, "Content:")
+	fmt.Fprintln(ctx.stdout, page.Content)
+	return 0
+}
+
 func renderDeletedWorkItem(ctx commandContext, id int, destroy bool, raw map[string]interface{}) int {
 	if ctx.jsonMode {
 		payload := map[string]interface{}{
@@ -1618,18 +1745,105 @@ func parsePullRequestURL(rawURL string) (pullRequestLocator, error) {
 	}
 
 	return pullRequestLocator{
-		BaseURL:        baseURL,
-		Project:        project,
-		Repository:     repository,
+		BaseURL:       baseURL,
+		Project:       project,
+		Repository:    repository,
 		PullRequestID: prID,
 	}, nil
 }
 
 type pullRequestLocator struct {
+	BaseURL       string
+	Project       string
+	Repository    string
+	PullRequestID int
+}
+
+type wikiPageLocator struct {
 	BaseURL        string
 	Project        string
-	Repository     string
-	PullRequestID int
+	WikiIdentifier string
+	PageID         int
+	PagePath       string
+	SourceURL      string
+}
+
+func parseWikiPageURL(rawURL string) (wikiPageLocator, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return wikiPageLocator{}, errs.New("invalid_url", "could not parse URL", err.Error())
+	}
+	if (!strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https")) || parsed.Host == "" || parsed.User != nil {
+		return wikiPageLocator{}, errs.New("invalid_url", "wiki URL must be an absolute HTTP(S) URL without user information", rawURL)
+	}
+
+	escapedSegments := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	segments := make([]string, 0, len(escapedSegments))
+	for _, segment := range escapedSegments {
+		decoded, decodeErr := url.PathUnescape(segment)
+		if decodeErr != nil {
+			return wikiPageLocator{}, errs.New("invalid_url", "could not decode wiki URL path", decodeErr.Error())
+		}
+		segments = append(segments, decoded)
+	}
+
+	wikiIndex := -1
+	for index, segment := range segments {
+		if strings.EqualFold(segment, "_wiki") {
+			wikiIndex = index
+			break
+		}
+	}
+	if wikiIndex < 1 || wikiIndex+2 >= len(segments) || !strings.EqualFold(segments[wikiIndex+1], "wikis") {
+		return wikiPageLocator{}, errs.New("invalid_url", "URL must contain /<project>/_wiki/wikis/<wiki>", rawURL)
+	}
+
+	project := strings.TrimSpace(segments[wikiIndex-1])
+	wikiIdentifier := strings.TrimSpace(segments[wikiIndex+2])
+	if project == "" || wikiIdentifier == "" {
+		return wikiPageLocator{}, errs.New("invalid_url", "wiki URL must contain a project and wiki identifier", rawURL)
+	}
+
+	pageID := 0
+	if wikiIndex+3 < len(segments) {
+		pageID, err = strconv.Atoi(segments[wikiIndex+3])
+		if err != nil || pageID <= 0 {
+			return wikiPageLocator{}, errs.New("invalid_url", "wiki page id must be a positive number", segments[wikiIndex+3])
+		}
+	}
+	pagePath := strings.TrimSpace(parsed.Query().Get("pagePath"))
+	if pageID == 0 && pagePath == "" {
+		return wikiPageLocator{}, errs.New("invalid_url", "wiki URL must contain a page id or pagePath query parameter", rawURL)
+	}
+
+	baseURL := parsed.Scheme + "://" + parsed.Host
+	if baseSegments := segments[:wikiIndex-1]; len(baseSegments) > 0 {
+		escapedBaseSegments := make([]string, 0, len(baseSegments))
+		for _, segment := range baseSegments {
+			escapedBaseSegments = append(escapedBaseSegments, url.PathEscape(segment))
+		}
+		baseURL += "/" + strings.Join(escapedBaseSegments, "/")
+	}
+
+	return wikiPageLocator{
+		BaseURL:        baseURL,
+		Project:        project,
+		WikiIdentifier: wikiIdentifier,
+		PageID:         pageID,
+		PagePath:       pagePath,
+		SourceURL:      rawURL,
+	}, nil
+}
+
+func sameTFSBaseURL(configured, fromWikiURL string) bool {
+	configuredURL, configuredErr := url.Parse(strings.TrimRight(strings.TrimSpace(configured), "/"))
+	wikiURL, wikiErr := url.Parse(strings.TrimRight(strings.TrimSpace(fromWikiURL), "/"))
+	if configuredErr != nil || wikiErr != nil {
+		return false
+	}
+	return strings.EqualFold(configuredURL.Scheme, wikiURL.Scheme) &&
+		strings.EqualFold(configuredURL.Host, wikiURL.Host) &&
+		strings.EqualFold(strings.TrimRight(configuredURL.Path, "/"), strings.TrimRight(wikiURL.Path, "/"))
 }
 
 func isURL(s string) bool {
@@ -1652,6 +1866,9 @@ func identityDisplayName(ref map[string]interface{}) string {
 	}
 	if un, ok := ref["uniqueName"].(string); ok && un != "" {
 		return un
+	}
+	if name, ok := ref["name"].(string); ok && name != "" {
+		return name
 	}
 	return ""
 }
@@ -1889,8 +2106,8 @@ func buildParentPatch(ctx context.Context, client *api.Client, itemID int, paren
 	for i := len(existingParentIndices) - 1; i >= 0; i-- {
 		idx := existingParentIndices[i]
 		patch = append(patch, map[string]interface{}{
-			"op":    "remove",
-			"path":  fmt.Sprintf("/relations/%d", idx),
+			"op":   "remove",
+			"path": fmt.Sprintf("/relations/%d", idx),
 		})
 	}
 
@@ -2060,6 +2277,7 @@ func showValueFlags() map[string]bool {
 	flags := wiqlValueFlags()
 	flags["children-rel"] = true
 	flags["max-children"] = true
+	flags["max-comments"] = true
 	return flags
 }
 
@@ -2239,7 +2457,7 @@ func idFromURL(value string) int {
 	return id
 }
 
-func printWorkItemDetails(w io.Writer, wi output.WorkItem, fields map[string]interface{}, children []output.WorkItem) {
+func printWorkItemDetails(w io.Writer, wi output.WorkItem, fields map[string]interface{}, comments []api.WorkItemComment, children []output.WorkItem) {
 	fmt.Fprintf(w, "ID: %d\n", wi.ID)
 	fmt.Fprintf(w, "Title: %s\n", stringValue(wi.Title))
 	fmt.Fprintf(w, "Type: %s\n", stringValue(wi.Type))
@@ -2252,17 +2470,50 @@ func printWorkItemDetails(w io.Writer, wi output.WorkItem, fields map[string]int
 		fmt.Fprintln(w, desc)
 		fmt.Fprintln(w, "")
 	}
-	if history, ok := fields["System.History"].(string); ok && history != "" {
-		fmt.Fprintln(w, "Comment (latest):")
-		fmt.Fprintln(w, history)
-		fmt.Fprintln(w, "")
-	}
+	printWorkItemComments(w, comments)
 	if len(children) == 0 {
 		fmt.Fprintln(w, "Children: none")
 		return
 	}
 	fmt.Fprintln(w, "Children:")
 	output.PrintTable(w, children)
+}
+
+func printWorkItemComments(w io.Writer, comments []api.WorkItemComment) {
+	visible := make([]api.WorkItemComment, 0, len(comments))
+	for _, comment := range comments {
+		if strings.TrimSpace(comment.Text) != "" {
+			visible = append(visible, comment)
+		}
+	}
+	if len(visible) == 0 {
+		fmt.Fprintln(w, "Comments: none")
+		fmt.Fprintln(w, "")
+		return
+	}
+
+	fmt.Fprintln(w, "Comments:")
+	for index, comment := range visible {
+		metadata := []string{}
+		if comment.Revision > 0 {
+			metadata = append(metadata, fmt.Sprintf("revision %d", comment.Revision))
+		}
+		if author := identityDisplayName(comment.RevisedBy); author != "" {
+			metadata = append(metadata, author)
+		}
+		if comment.RevisedDate != "" {
+			metadata = append(metadata, comment.RevisedDate)
+		}
+		label := fmt.Sprintf("%d.", index+1)
+		if len(metadata) > 0 {
+			label += " " + strings.Join(metadata, " | ")
+		}
+		fmt.Fprintf(w, "  %s\n", label)
+		for _, line := range strings.Split(strings.TrimSpace(comment.Text), "\n") {
+			fmt.Fprintf(w, "    %s\n", line)
+		}
+	}
+	fmt.Fprintln(w, "")
 }
 
 func splitPositional(args []string, valueFlags map[string]bool) (string, []string) {
@@ -2359,9 +2610,10 @@ func printUsage(w io.Writer) {
 		"  tfs pr create --repository \"<Repo>\" --source \"<Branch>\" --target \"<Branch>\" --title \"<Title>\" [--description \"<Text>\"] [--draft] [--work-item <ID> ...] [--auto-complete] [--json]  Create a pull request.",
 		"  tfs pr show <URL | ID> [--repository \"<Repo>\"] [--max-threads N] [--git-diff] [--json]  Show pull request details: repo, branches, title, work items, comments, optional git diff.",
 		"  tfs pr comment <URL | ID> --content \"<text>\" [--repository \"<Repo>\"] [--status active|resolved|closed] [--json]  Post a comment thread on a pull request. Use --content - for stdin or --content-file <path> for file input.",
+		"  tfs wiki show <URL> [--json]                                      Show wiki page metadata and Markdown content by browser URL.",
 		"  tfs search --query \"<text>\" [--project P] [--top N] [--json]     Search by Title/Description.",
 		"  tfs my [--top N] [--type \"<Type>\"] [--exclude-state \"<State>\"] [--all-states] [--json]  List my items in the current project (default states: Разработка, Выполняется).",
-		"  tfs show <id> [--children-rel <rel>] [--max-children N] [--json]  Show details and child items.",
+		"  tfs show <id> [--children-rel <rel>] [--max-children N] [--max-comments N] [--json]  Show details, comments, and child items.",
 		"  tfs types [--project P] [--json]                                   List work item types for the project.",
 		"  tfs whoami [--json]                                                Show the identity resolved from PAT.",
 		"  tfs config view [--json]                                           Show config (PAT redacted).",

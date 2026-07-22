@@ -61,6 +61,35 @@ type WorkItemsBatchResponse struct {
 	Value []WorkItem `json:"value"`
 }
 
+type WorkItemComment struct {
+	Revision    int                    `json:"revision"`
+	Text        string                 `json:"text"`
+	RevisedBy   map[string]interface{} `json:"revisedBy"`
+	RevisedDate string                 `json:"revisedDate,omitempty"`
+	URL         string                 `json:"url,omitempty"`
+}
+
+type WorkItemCommentsResponse struct {
+	TotalCount        int               `json:"totalCount"`
+	FromRevisionCount int               `json:"fromRevisionCount"`
+	Count             int               `json:"count"`
+	Value             []WorkItemComment `json:"value"`
+	Comments          []WorkItemComment `json:"comments"`
+}
+
+type WikiPage struct {
+	ID              int        `json:"id,omitempty"`
+	Path            string     `json:"path"`
+	Order           int        `json:"order,omitempty"`
+	GitItemPath     string     `json:"gitItemPath,omitempty"`
+	IsParentPage    bool       `json:"isParentPage,omitempty"`
+	IsNonConformant bool       `json:"isNonConformant,omitempty"`
+	Content         string     `json:"content"`
+	URL             string     `json:"url,omitempty"`
+	RemoteURL       string     `json:"remoteUrl,omitempty"`
+	SubPages        []WikiPage `json:"subPages,omitempty"`
+}
+
 type Identity struct {
 	ID                  string                 `json:"id"`
 	Descriptor          string                 `json:"descriptor"`
@@ -110,24 +139,24 @@ type GitRepository struct {
 }
 
 type GitPullRequest struct {
-	PullRequestID     int                              `json:"pullRequestId"`
-	CodeReviewID      int                              `json:"codeReviewId"`
-	Status            string                           `json:"status"`
-	Title             string                           `json:"title"`
-	Description       string                           `json:"description"`
-	SourceRefName     string                           `json:"sourceRefName"`
-	TargetRefName     string                           `json:"targetRefName"`
-	IsDraft           bool                             `json:"isDraft"`
-	URL               string                           `json:"url"`
-	CreationDate      string                           `json:"creationDate,omitempty"`
-	Repository        GitRepository                    `json:"repository"`
-	Links             map[string]Link                  `json:"_links"`
-	CreatedBy               map[string]interface{}           `json:"createdBy"`
-	AutoCompleteSetBy       *IdentityRef                     `json:"autoCompleteSetBy,omitempty"`
-	CompletionOptions       *GitPullRequestCompletionOptions `json:"completionOptions,omitempty"`
-	WorkItemRefs            []ResourceRef                    `json:"workItemRefs,omitempty"`
-	LastMergeSourceCommit   *GitCommitRef                    `json:"lastMergeSourceCommit,omitempty"`
-	LastMergeTargetCommit   *GitCommitRef                    `json:"lastMergeTargetCommit,omitempty"`
+	PullRequestID         int                              `json:"pullRequestId"`
+	CodeReviewID          int                              `json:"codeReviewId"`
+	Status                string                           `json:"status"`
+	Title                 string                           `json:"title"`
+	Description           string                           `json:"description"`
+	SourceRefName         string                           `json:"sourceRefName"`
+	TargetRefName         string                           `json:"targetRefName"`
+	IsDraft               bool                             `json:"isDraft"`
+	URL                   string                           `json:"url"`
+	CreationDate          string                           `json:"creationDate,omitempty"`
+	Repository            GitRepository                    `json:"repository"`
+	Links                 map[string]Link                  `json:"_links"`
+	CreatedBy             map[string]interface{}           `json:"createdBy"`
+	AutoCompleteSetBy     *IdentityRef                     `json:"autoCompleteSetBy,omitempty"`
+	CompletionOptions     *GitPullRequestCompletionOptions `json:"completionOptions,omitempty"`
+	WorkItemRefs          []ResourceRef                    `json:"workItemRefs,omitempty"`
+	LastMergeSourceCommit *GitCommitRef                    `json:"lastMergeSourceCommit,omitempty"`
+	LastMergeTargetCommit *GitCommitRef                    `json:"lastMergeTargetCommit,omitempty"`
 }
 
 type GitCommitRef struct {
@@ -153,8 +182,8 @@ type GitChange struct {
 }
 
 type GitPullRequestIteration struct {
-	ID           int          `json:"id"`
-	CreatedDate  string       `json:"createdDate,omitempty"`
+	ID              int           `json:"id"`
+	CreatedDate     string        `json:"createdDate,omitempty"`
 	SourceRefCommit *GitCommitRef `json:"sourceRefCommit,omitempty"`
 	TargetRefCommit *GitCommitRef `json:"targetRefCommit,omitempty"`
 }
@@ -189,13 +218,13 @@ type GitPullRequestComment struct {
 }
 
 type GitPullRequestThread struct {
-	ID              int                    `json:"id"`
-	Status          string                 `json:"status,omitempty"`
-	IsDeleted       bool                   `json:"isDeleted,omitempty"`
+	ID              int                     `json:"id"`
+	Status          string                  `json:"status,omitempty"`
+	IsDeleted       bool                    `json:"isDeleted,omitempty"`
 	Comments        []GitPullRequestComment `json:"comments"`
-	PublishedDate   string                 `json:"publishedDate,omitempty"`
-	LastUpdatedDate string                 `json:"lastUpdatedDate,omitempty"`
-	Context         map[string]interface{} `json:"context,omitempty"`
+	PublishedDate   string                  `json:"publishedDate,omitempty"`
+	LastUpdatedDate string                  `json:"lastUpdatedDate,omitempty"`
+	Context         map[string]interface{}  `json:"context,omitempty"`
 }
 
 type GitPullRequestThreadsResponse struct {

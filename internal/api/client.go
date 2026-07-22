@@ -18,11 +18,14 @@ import (
 )
 
 const (
-	defaultTimeout    = 30 * time.Second
-	maxRetries        = 4
-	initialBackoff    = 500 * time.Millisecond
-	maxBackoff        = 5 * time.Second
-	defaultAPIVersion = "6.0"
+	defaultTimeout             = 30 * time.Second
+	maxRetries                 = 4
+	initialBackoff             = 500 * time.Millisecond
+	maxBackoff                 = 5 * time.Second
+	defaultAPIVersion          = "6.0"
+	wikiAPIVersion             = "6.0-preview.1"
+	workItemCommentsAPIVersion = "5.0-preview.2"
+	workItemCommentsPageSize   = 200
 )
 
 type Client struct {
@@ -107,6 +110,114 @@ func (c *Client) GetWorkItem(ctx context.Context, id int, fields []string, expan
 		return WorkItem{}, err
 	}
 	return wi, nil
+}
+
+func (c *Client) GetWorkItemComments(ctx context.Context, id, maxComments int) ([]WorkItemComment, error) {
+	if id <= 0 {
+		return nil, errs.New("invalid_args", "work item id must be positive", id)
+	}
+	if maxComments < 0 {
+		return nil, errs.New("invalid_args", "maximum comments must not be negative", maxComments)
+	}
+
+	comments := []WorkItemComment{}
+	fromRevision := 1
+	for {
+		pageSize := workItemCommentsPageSize
+		if maxComments > 0 && maxComments-len(comments) < pageSize {
+			pageSize = maxComments - len(comments)
+		}
+		if pageSize <= 0 {
+			return comments, nil
+		}
+
+		path := fmt.Sprintf("%s/_apis/wit/workItems/%d/comments", c.project, id)
+		params := url.Values{}
+		params.Set("api-version", workItemCommentsAPIVersion)
+		params.Set("fromRevision", strconv.Itoa(fromRevision))
+		params.Set("$top", strconv.Itoa(pageSize))
+		params.Set("order", "asc")
+
+		respBody, err := c.do(ctx, http.MethodGet, path, params, nil, "")
+		if err != nil {
+			return nil, err
+		}
+		var resp WorkItemCommentsResponse
+		if err := json.Unmarshal(respBody, &resp); err != nil {
+			return nil, err
+		}
+		page := resp.Value
+		if len(page) == 0 {
+			page = resp.Comments
+		}
+		if len(page) == 0 {
+			return comments, nil
+		}
+
+		if maxComments > 0 && len(page) > maxComments-len(comments) {
+			page = page[:maxComments-len(comments)]
+		}
+		comments = append(comments, page...)
+		if maxComments > 0 && len(comments) >= maxComments {
+			return comments, nil
+		}
+		if resp.TotalCount > 0 && len(comments) >= resp.TotalCount {
+			return comments, nil
+		}
+
+		lastRevision := page[len(page)-1].Revision
+		if lastRevision < fromRevision {
+			return nil, errs.New("invalid_response", "work item comments pagination did not advance", map[string]int{
+				"fromRevision": fromRevision,
+				"lastRevision": lastRevision,
+			})
+		}
+		fromRevision = lastRevision + 1
+	}
+}
+
+func (c *Client) GetWikiPageByID(ctx context.Context, wikiIdentifier string, pageID int) (WikiPage, error) {
+	if strings.TrimSpace(wikiIdentifier) == "" {
+		return WikiPage{}, errs.New("invalid_args", "wiki identifier is required", nil)
+	}
+	if pageID <= 0 {
+		return WikiPage{}, errs.New("invalid_args", "wiki page id must be positive", pageID)
+	}
+
+	path := fmt.Sprintf("%s/_apis/wiki/wikis/%s/pages/%d", c.project, url.PathEscape(wikiIdentifier), pageID)
+	return c.getWikiPage(ctx, path, nil)
+}
+
+func (c *Client) GetWikiPageByPath(ctx context.Context, wikiIdentifier, pagePath string) (WikiPage, error) {
+	if strings.TrimSpace(wikiIdentifier) == "" {
+		return WikiPage{}, errs.New("invalid_args", "wiki identifier is required", nil)
+	}
+	if strings.TrimSpace(pagePath) == "" {
+		return WikiPage{}, errs.New("invalid_args", "wiki page path is required", nil)
+	}
+
+	path := fmt.Sprintf("%s/_apis/wiki/wikis/%s/pages", c.project, url.PathEscape(wikiIdentifier))
+	params := url.Values{}
+	params.Set("path", pagePath)
+	return c.getWikiPage(ctx, path, params)
+}
+
+func (c *Client) getWikiPage(ctx context.Context, path string, params url.Values) (WikiPage, error) {
+	if params == nil {
+		params = url.Values{}
+	}
+	params.Set("includeContent", "true")
+	params.Set("api-version", wikiAPIVersion)
+
+	respBody, err := c.do(ctx, http.MethodGet, path, params, nil, "")
+	if err != nil {
+		return WikiPage{}, err
+	}
+	var page WikiPage
+	if err := json.Unmarshal(respBody, &page); err != nil {
+		return WikiPage{}, err
+	}
+	return page, nil
 }
 
 func (c *Client) GetWorkItemsBatch(ctx context.Context, ids []int, fields []string) ([]WorkItem, error) {
